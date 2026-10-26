@@ -1,0 +1,7 @@
+[2026-10-23 10:46:01.085] [INFO ] ========== 应用启动 ==========
+[2026-10-23 16:00:28.301] [INFO ] ========== 应用启动 ==========
+[2026-10-23 16:00:30.645] [WARN ] QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+[2026-10-23 16:01:43.816] [INFO ] ========== 应用启动 ==========
+[2026-10-23 16:01:45.592] [WARN ] QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+[2026-10-23 16:13:02.641] [INFO ] ========== 应用启动 ==========
+[2026-10-23 16:13:05.374] [WARN ] QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
