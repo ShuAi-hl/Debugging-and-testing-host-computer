@@ -15,6 +15,7 @@
 #include <QPlainTextEdit>
 #include <QStackedWidget>
 #include <QSerialPort>
+#include <QMap>
 
 /**
  * @brief 协议枚举（暴露给 Controller 使用）
@@ -49,7 +50,8 @@ public:
 signals:
     void scanRequested(int protocol);
     void connectRequested(int protocol);
-    void disconnectRequested(int protocol);
+    /// 断开所有协议的连接（不区分当前选中哪个协议）
+    void disconnectRequested();
     void sendRequested(int protocol, const QByteArray &data);
 
 private slots:
@@ -62,12 +64,14 @@ private slots:
 public slots:
     // Controller 回调 → 更新 View 显示
     void onPortsScanned(const QStringList &ports);
-    void onConnectionStateChanged(bool connected);
+    void onConnectionStateChanged(int protocol, bool connected);
     void onErrorOccurred(const QString &msg);
     void onRawBytesReceived(const QByteArray &data);
 
 private:
     void buildUi();
+    /// 按当前协议的连接状态刷新标签/按钮/参数页可用性
+    void refreshConnectionUi();
     QWidget *createSerialPage();
     QWidget *createModbusPage();
     QWidget *createModbusTcpPage();
@@ -116,6 +120,9 @@ private:
     QCheckBox      *m_hexModeCheck = nullptr;
     QComboBox      *m_rxFormatCombo = nullptr;
     QByteArray      m_rxPendingBytes;
+
+    // 每个协议各自的连接状态（key = Protocol 枚举值），避免一个协议的状态污染另一个协议
+    QMap<int, bool> m_connectedByProtocol;
 };
 
 #endif // CONNECTIONPANEL_H

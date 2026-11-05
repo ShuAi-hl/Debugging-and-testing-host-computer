@@ -10,6 +10,19 @@
 #include "../ui/datatablewidget.h"
 #include "../ui/realtimechartwidget.h"
 
+#include <QMetaObject>
+#include <utility>
+
+namespace {
+/// 把操作投递到 Worker 所属线程执行。
+/// Worker 的定时器/套接字只能在它自己的线程里操作，GUI 线程直接调用会失效。
+template <typename Fn>
+void postToWorker(QObject *worker, Fn &&fn)
+{
+    QMetaObject::invokeMethod(worker, std::forward<Fn>(fn), Qt::QueuedConnection);
+}
+} // namespace
+
 MainController::MainController(QObject *parent)
     : QObject(parent)
 {
@@ -102,21 +115,24 @@ void MainController::wireSignals()
     wireWorkerToBus(m_simWorker);
 
     // ===== C. Worker → View（状态/调试信号）=====
-    auto wireWorkerToView = [&](IProtocolWorker *w) {
+    auto wireWorkerToView = [&](IProtocolWorker *w, int protocol) {
         connect(w, &IProtocolWorker::portsScanned,
                 m_connPanel, &ConnectionPanel::onPortsScanned);
+        // 带上协议编号，View 才能按协议分别记录连接状态
         connect(w, &IProtocolWorker::connectionStateChanged,
-                m_connPanel, &ConnectionPanel::onConnectionStateChanged);
+                m_connPanel, [panel = m_connPanel, protocol](bool connected) {
+                    panel->onConnectionStateChanged(protocol, connected);
+                });
         connect(w, &IProtocolWorker::errorOccurred,
                 m_connPanel, &ConnectionPanel::onErrorOccurred);
         connect(w, &IProtocolWorker::rawBytesReceived,
                 m_connPanel, &ConnectionPanel::onRawBytesReceived);
     };
-    wireWorkerToView(m_serialWorker);
-    wireWorkerToView(m_modbusWorker);
-    wireWorkerToView(m_modbusTcpWorker);
-    wireWorkerToView(m_canWorker);
-    wireWorkerToView(m_simWorker);
+    wireWorkerToView(m_serialWorker,    static_cast<int>(Protocol::Serial));
+    wireWorkerToView(m_modbusWorker,    static_cast<int>(Protocol::ModbusRTU));
+    wireWorkerToView(m_modbusTcpWorker, static_cast<int>(Protocol::ModbusTCP));
+    wireWorkerToView(m_canWorker,       static_cast<int>(Protocol::CAN));
+    wireWorkerToView(m_simWorker,       static_cast<int>(Protocol::Simulator));
 
     // ===== D. DataBus → UI 消费者 =====
     if (m_chartWidget) {
@@ -136,44 +152,81 @@ void MainController::wireSignals()
 void MainController::onScanRequested(int protocol)
 {
     switch (static_cast<Protocol>(protocol)) {
-    case Protocol::Serial:    m_serialWorker->scanPorts();      break;
-    case Protocol::ModbusRTU: m_modbusWorker->scanPorts();      break;
-    case Protocol::ModbusTCP: m_modbusTcpWorker->scanPorts();   break;
-    case Protocol::CAN:       m_canWorker->scanPorts();         break;
-    case Protocol::Simulator: m_simWorker->scanPorts();         break;
+    case Protocol::Serial:
+        postToWorker(m_serialWorker, [w = m_serialWorker] { w->scanPorts(); });
+        break;
+    case Protocol::ModbusRTU:
+        postToWorker(m_modbusWorker, [w = m_modbusWorker] { w->scanPorts(); });
+        break;
+    case Protocol::ModbusTCP:
+        postToWorker(m_modbusTcpWorker, [w = m_modbusTcpWorker] { w->scanPorts(); });
+        break;
+    case Protocol::CAN:
+        postToWorker(m_canWorker, [w = m_canWorker] { w->scanPorts(); });
+        break;
+    case Protocol::Simulator:
+        postToWorker(m_simWorker, [w = m_simWorker] { w->scanPorts(); });
+        break;
     }
 }
 
 void MainController::onConnectRequested(int protocol)
 {
+    // 先把配置投递到 Worker 线程，再投递打开连接；同一线程队列保证先后顺序
     applyConfig(protocol);
     switch (static_cast<Protocol>(protocol)) {
-    case Protocol::Serial:    m_serialWorker->openConnection();      break;
-    case Protocol::ModbusRTU: m_modbusWorker->openConnection();      break;
-    case Protocol::ModbusTCP: m_modbusTcpWorker->openConnection();   break;
-    case Protocol::CAN:       m_canWorker->openConnection();         break;
-    case Protocol::Simulator: m_simWorker->openConnection();         break;
+    case Protocol::Serial:
+        postToWorker(m_serialWorker, [w = m_serialWorker] { w->openConnection(); });
+        break;
+    case Protocol::ModbusRTU:
+        postToWorker(m_modbusWorker, [w = m_modbusWorker] { w->openConnection(); });
+        break;
+    case Protocol::ModbusTCP:
+        postToWorker(m_modbusTcpWorker, [w = m_modbusTcpWorker] { w->openConnection(); });
+        break;
+    case Protocol::CAN:
+        postToWorker(m_canWorker, [w = m_canWorker] { w->openConnection(); });
+        break;
+    case Protocol::Simulator:
+        postToWorker(m_simWorker, [w = m_simWorker] { w->openConnection(); });
+        break;
     }
 }
 
-void MainController::onDisconnectRequested(int protocol)
+void MainController::onDisconnectRequested()
 {
-    switch (static_cast<Protocol>(protocol)) {
-    case Protocol::Serial:    m_serialWorker->closeConnection();      break;
-    case Protocol::ModbusRTU: m_modbusWorker->closeConnection();      break;
-    case Protocol::ModbusTCP: m_modbusTcpWorker->closeConnection();   break;
-    case Protocol::CAN:       m_canWorker->closeConnection();         break;
-    case Protocol::Simulator: m_simWorker->closeConnection();         break;
-    }
+    // 「断开」是全局动作：所有 Worker 一律关闭，避免后台残留连接继续跑
+    postToWorker(m_serialWorker,
+                 [w = m_serialWorker] { w->closeConnection(); });
+    postToWorker(m_modbusWorker,
+                 [w = m_modbusWorker] { w->closeConnection(); });
+    postToWorker(m_modbusTcpWorker,
+                 [w = m_modbusTcpWorker] { w->closeConnection(); });
+    postToWorker(m_canWorker,
+                 [w = m_canWorker] { w->closeConnection(); });
+    postToWorker(m_simWorker,
+                 [w = m_simWorker] { w->closeConnection(); });
 }
 
 void MainController::onSendRequested(int protocol, const QByteArray &data)
 {
     switch (static_cast<Protocol>(protocol)) {
-    case Protocol::Serial:    m_serialWorker->sendCommand(data);      break;
-    case Protocol::ModbusRTU: m_modbusWorker->sendCommand(data);      break;
-    case Protocol::ModbusTCP: m_modbusTcpWorker->sendCommand(data);   break;
-    case Protocol::CAN:       m_canWorker->sendCommand(data);         break;
+    case Protocol::Serial:
+        postToWorker(m_serialWorker,
+                     [w = m_serialWorker, data] { w->sendCommand(data); });
+        break;
+    case Protocol::ModbusRTU:
+        postToWorker(m_modbusWorker,
+                     [w = m_modbusWorker, data] { w->sendCommand(data); });
+        break;
+    case Protocol::ModbusTCP:
+        postToWorker(m_modbusTcpWorker,
+                     [w = m_modbusTcpWorker, data] { w->sendCommand(data); });
+        break;
+    case Protocol::CAN:
+        postToWorker(m_canWorker,
+                     [w = m_canWorker, data] { w->sendCommand(data); });
+        break;
     case Protocol::Simulator: break;
     }
 }
@@ -200,7 +253,8 @@ void MainController::applyConfig(int protocol)
         if (sb == QStringLiteral("1")) cfg.stopBits = QSerialPort::OneStop;
         else if (sb == QStringLiteral("2")) cfg.stopBits = QSerialPort::TwoStop;
         else cfg.stopBits = QSerialPort::OneAndHalfStop;
-        m_serialWorker->setConfig(cfg);
+        postToWorker(m_serialWorker,
+                     [w = m_serialWorker, cfg] { w->setConfig(cfg); });
         break;
     }
     case Protocol::ModbusRTU: {
@@ -209,8 +263,12 @@ void MainController::applyConfig(int protocol)
         cfg.portName = map[QStringLiteral("portName")].toString();
         cfg.baudRate = map[QStringLiteral("baudRate")].value<qint32>();
         cfg.slaveId  = map[QStringLiteral("slaveId")].value<quint8>();
-        m_modbusWorker->setConfig(cfg);
-        m_modbusWorker->setPollInterval(map[QStringLiteral("pollInterval")].toInt());
+        const int pollMs = map[QStringLiteral("pollInterval")].toInt();
+        postToWorker(m_modbusWorker,
+                     [w = m_modbusWorker, cfg, pollMs] {
+                         w->setConfig(cfg);
+                         w->setPollInterval(pollMs);
+                     });
         break;
     }
     case Protocol::ModbusTCP: {
@@ -219,8 +277,12 @@ void MainController::applyConfig(int protocol)
         cfg.host   = map[QStringLiteral("host")].toString();
         cfg.port   = map[QStringLiteral("port")].value<quint16>();
         cfg.unitId = map[QStringLiteral("unitId")].value<quint8>();
-        m_modbusTcpWorker->setConfig(cfg);
-        m_modbusTcpWorker->setPollInterval(map[QStringLiteral("pollInterval")].toInt());
+        const int pollMs = map[QStringLiteral("pollInterval")].toInt();
+        postToWorker(m_modbusTcpWorker,
+                     [w = m_modbusTcpWorker, cfg, pollMs] {
+                         w->setConfig(cfg);
+                         w->setPollInterval(pollMs);
+                     });
         break;
     }
     case Protocol::CAN: {
@@ -229,14 +291,19 @@ void MainController::applyConfig(int protocol)
         cfg.pluginName = map[QStringLiteral("pluginName")].toString();
         cfg.deviceName = map[QStringLiteral("deviceName")].toString();
         cfg.bitrate    = map[QStringLiteral("bitrate")].toInt();
-        m_canWorker->setConfig(cfg);
+        postToWorker(m_canWorker,
+                     [w = m_canWorker, cfg] { w->setConfig(cfg); });
         break;
     }
     case Protocol::Simulator: {
         auto map = m_connPanel->simConfig();
-        m_simWorker->setScene(static_cast<SimulatorWorker::Scene>(
-                                  map[QStringLiteral("scene")].toInt()));
-        m_simWorker->setPollInterval(map[QStringLiteral("pollInterval")].toInt());
+        const int scene = map[QStringLiteral("scene")].toInt();
+        const int pollMs = map[QStringLiteral("pollInterval")].toInt();
+        postToWorker(m_simWorker,
+                     [w = m_simWorker, scene, pollMs] {
+                         w->setScene(static_cast<SimulatorWorker::Scene>(scene));
+                         w->setPollInterval(pollMs);
+                     });
         break;
     }
     }

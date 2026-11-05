@@ -1,0 +1,41 @@
+# ===== Qt / qmake 构建产物 =====
+Makefile
+Makefile.*
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.qm
+.qmake.stash
+ui_*.h
+moc_*.cpp
+moc_*.h
+moc_predefs.h
+qrc_*.cpp
+object_script.*
+
+# ===== 构建 / 部署目录 =====
+build/
+debug/
+release/
+dist/
+
+# ===== 运行日志 =====
+logs/
+*.log
+
+# ===== Qt Creator / IDE 本地配置 =====
+.qtcreator/
+.vscode/
+*.user
+*.pro.user
+.codex/
+.trae/
+
+# ===== 系统文件 =====
+Thumbs.db
+.DS_Store
+desktop.ini

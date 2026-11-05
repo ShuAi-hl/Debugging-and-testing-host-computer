@@ -6,6 +6,18 @@
 #include <QDateTime>
 #include <QVariantMap>
 
+static QString protocolDisplayName(int protocol)
+{
+    switch (static_cast<Protocol>(protocol)) {
+    case Protocol::Serial:    return QStringLiteral("串口");
+    case Protocol::ModbusRTU: return QStringLiteral("Modbus RTU");
+    case Protocol::ModbusTCP: return QStringLiteral("Modbus TCP");
+    case Protocol::CAN:       return QStringLiteral("CAN 总线");
+    case Protocol::Simulator: return QStringLiteral("数据模拟器");
+    }
+    return QStringLiteral("未知协议");
+}
+
 ConnectionPanel::ConnectionPanel(QWidget *parent)
     : QWidget(parent)
 {
@@ -67,10 +79,9 @@ void ConnectionPanel::buildUi()
     auto *rxRow = new QHBoxLayout();
     rxRow->addWidget(new QLabel(QStringLiteral("接收显示:"), this));
     m_rxFormatCombo = new QComboBox(this);
-    m_rxFormatCombo->addItem(QStringLiteral("ASCII"));
-    m_rxFormatCombo->addItem(QStringLiteral("UTF-8 (中文)"));
+    m_rxFormatCombo->addItem(QStringLiteral("文本显示"));
     m_rxFormatCombo->addItem(QStringLiteral("HEX"));
-    m_rxFormatCombo->setCurrentIndex(1);
+    m_rxFormatCombo->setCurrentIndex(0);
     rxRow->addWidget(m_rxFormatCombo);
     rxRow->addStretch(1);
 
@@ -309,8 +320,11 @@ void ConnectionPanel::onProtocolChanged(int idx)
     Q_UNUSED(idx);
     Protocol p = currentProtocol();
     m_configStack->setCurrentIndex(static_cast<int>(p));
-    // TCP/模拟器不需要扫描，只有串口类协议才发扫描请求
-    if (p == Protocol::Serial || p == Protocol::ModbusRTU || p == Protocol::CAN)
+    // 切协议后按该协议自己的连接状态刷新，避免沿用上一个协议的"已连接"
+    refreshConnectionUi();
+    // 已连接的协议不再自动扫描（否则会清空/重填端口列表，与实际打开的端口不符）
+    const bool connected = m_connectedByProtocol.value(static_cast<int>(p), false);
+    if (!connected && (p == Protocol::Serial || p == Protocol::ModbusRTU || p == Protocol::CAN))
         emit scanRequested(static_cast<int>(p));
 }
 
@@ -326,7 +340,8 @@ void ConnectionPanel::onConnectClicked()
 
 void ConnectionPanel::onDisconnectClicked()
 {
-    emit disconnectRequested(static_cast<int>(currentProtocol()));
+    // 一次断开全部协议，避免后台残留连接继续产生数据
+    emit disconnectRequested();
 }
 
 void ConnectionPanel::onSendClicked()
@@ -393,25 +408,49 @@ void ConnectionPanel::onPortsScanned(const QStringList &ports)
         QStringLiteral("[INFO] 扫描到 %1 个设备").arg(ports.size()));
 }
 
-void ConnectionPanel::onConnectionStateChanged(bool connected)
+void ConnectionPanel::onConnectionStateChanged(int protocol, bool connected)
 {
+    // 按协议分别记录状态，避免一个协议的连接状态被当成另一个协议的
+    m_connectedByProtocol[protocol] = connected;
+
+    // 无论哪个协议变化都要刷新：断开按钮取决于"是否还有任意协议在连接"
+    refreshConnectionUi();
+
+    m_terminal->appendPlainText(
+        QStringLiteral("[INFO] %1: %2")
+            .arg(protocolDisplayName(protocol),
+                 connected ? QStringLiteral("已连接") : QStringLiteral("已断开")));
+}
+
+void ConnectionPanel::refreshConnectionUi()
+{
+    const bool connected =
+        m_connectedByProtocol.value(static_cast<int>(currentProtocol()), false);
+
+    // 任意协议仍在连接时，「断开」都应可用（它负责断开全部连接）
+    bool anyConnected = false;
+    for (bool state : m_connectedByProtocol) {
+        if (state) { anyConnected = true; break; }
+    }
+
     if (connected) {
         m_statusLabel->setText(QStringLiteral("● 已连接"));
         m_statusLabel->setObjectName(QStringLiteral("statusLabelConnected"));
-        m_connectBtn->setEnabled(false);
-        m_disconnectBtn->setEnabled(true);
     } else {
         m_statusLabel->setText(QStringLiteral("● 未连接"));
         m_statusLabel->setObjectName(QStringLiteral("statusLabel"));
-        m_connectBtn->setEnabled(true);
-        m_disconnectBtn->setEnabled(false);
     }
+    m_connectBtn->setEnabled(!connected);
+    m_disconnectBtn->setEnabled(anyConnected);
+
+    // 连接期间锁定参数页和扫描按钮：改了端口/设备就与真实连接不符，
+    // 必须先「断开」再修改参数。
+    if (QWidget *page = m_configStack->currentWidget())
+        page->setEnabled(!connected);
+    m_scanBtn->setEnabled(!connected);
+
     m_statusLabel->style()->unpolish(m_statusLabel);
     m_statusLabel->style()->polish(m_statusLabel);
-
-    m_terminal->appendPlainText(
-        QStringLiteral("[INFO] 连接状态: %1")
-            .arg(connected ? QStringLiteral("已连接") : QStringLiteral("已断开")));
 }
 
 void ConnectionPanel::onErrorOccurred(const QString &msg)
@@ -423,22 +462,15 @@ void ConnectionPanel::onErrorOccurred(const QString &msg)
 
 void ConnectionPanel::onRawBytesReceived(const QByteArray &data)
 {
-    const int fmt = m_rxFormatCombo ? m_rxFormatCombo->currentIndex() : 1;
+    // 0=文本显示（UTF-8 解码，兼容中文；二进制字节显示为 '.'），1=HEX
+    const int fmt = m_rxFormatCombo ? m_rxFormatCombo->currentIndex() : 0;
     QString text;
 
-    if (fmt == 2) {
+    if (fmt == 1) {
         m_rxPendingBytes.clear();
         text = QString::fromLatin1(data.toHex(' ')).toUpper();
-    } else if (fmt == 0) {
-        m_rxPendingBytes.clear();
-        QByteArray printable;
-        printable.reserve(data.size());
-        for (char c : data) {
-            unsigned char uc = static_cast<unsigned char>(c);
-            printable.append((uc >= 0x20 && uc < 0x7F) ? c : '.');
-        }
-        text = QString::fromLatin1(printable);
     } else {
+        // 拼接上一次的截断尾部，避免跨包的中文被拆成乱码
         QByteArray buf = m_rxPendingBytes + data;
         m_rxPendingBytes.clear();
 
@@ -457,7 +489,15 @@ void ConnectionPanel::onRawBytesReceived(const QByteArray &data)
                 break;
             }
         }
+
         text = QString::fromUtf8(buf.constData(), end);
+        // 控制字符和非法 UTF-8 字节（解码出的替换符）统一显示为 '.'，
+        // 避免二进制协议帧把终端刷成一片不可见字符
+        for (QChar &ch : text) {
+            const ushort u = ch.unicode();
+            if (u < 0x20 || u == 0x7F || u == 0xFFFD)
+                ch = QLatin1Char('.');
+        }
     }
 
     if (!text.isEmpty())

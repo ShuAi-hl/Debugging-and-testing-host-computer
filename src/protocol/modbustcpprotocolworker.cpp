@@ -66,7 +66,10 @@ bool ModbusTcpProtocolWorker::doClose()
 
 void ModbusTcpProtocolWorker::openConnection()
 {
-    if (doOpen()) setConnected(true);
+    if (doOpen()) {
+        setConnected(true);
+        startPolling();   // 连接成功后开始轮询寄存器
+    }
 }
 
 void ModbusTcpProtocolWorker::closeConnection()

@@ -49,7 +49,8 @@ private slots:
     // ===== View 请求 → Worker =====
     void onScanRequested(int protocol);
     void onConnectRequested(int protocol);
-    void onDisconnectRequested(int protocol);
+    /// 断开全部协议的连接
+    void onDisconnectRequested();
     void onSendRequested(int protocol, const QByteArray &data);
 
 private:
